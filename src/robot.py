@@ -6,7 +6,7 @@ import argparse
 import logging
 import os
 import traceback
-import params as p
+import controller_params as p
 
 import ev3dev.ev3 as ev3
 import packet
