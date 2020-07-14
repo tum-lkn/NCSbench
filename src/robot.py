@@ -6,10 +6,17 @@ import argparse
 import logging
 import os
 import traceback
-import controller_params as p
-
-import ev3dev.ev3 as ev3
+import controller_params as p 
+# import ev3dev.ev3 as ev3
 import packet
+import brickpi3 # import the BrickPi3 drivers							
+
+BP = brickpi3.BrickPi3() # Create an instance of the BrickPi3 class. BP will be the BrickPi3 object.
+motor_left = BP.PORT_D
+motor_right = BP.PORT_A
+sensor_gyro = BP.PORT_1
+
+buttons = False
 
 
 # ----------- Sensor Methods -----------------
@@ -35,98 +42,74 @@ def send_sensor_signals(socket, addr, port,
     socket.sendto(stuff, (addr, port))
 
 
-# For reading from the sensor files
+# For reading from the sensor files (Not needed)
+"""
 def SensorRead(infile):
     infile.seek(0)
     return float(infile.read().decode().strip())
+"""
+def calibrate_gyro():
+	gyroOffset = 0.0
+	gyroRateCalibrateCount = 200
 
+	for i in range(gyroRateCalibrateCount):
+		gyro_val = BP.get_sensor(sensor_gyro)
+		print("S: Gyro reading {}: {}".format(i, gyro_val))
+		gyroOffset = gyroOffset + float(gyro_val)
+		time.sleep(0.01)
 
-def calibrate_gyro(gyroSensorValueRaw):
-
-    gyroOffset = 0.0
-    gyroRateCalibrateCount = 200
-    for i in range(gyroRateCalibrateCount):
-
-        gyro = SensorRead(gyroSensorValueRaw)
-        logging.debug("S: Gyro reading %d: %f", i, gyro)
-
-        gyroOffset = gyroOffset + gyro
-        time.sleep(0.01)
-
-    gyroOffset = gyroOffset / gyroRateCalibrateCount
-
-    return gyroOffset
+	gyroOffset = float(gyroOffset) / gyroRateCalibrateCount
+	print("Calibration done..Gyro offset: {}".format(gyroOffset))
+	return gyroOffset
 
 
 def init_sensors():
-    """ Instantiates and calibrates both gyro sensor and motors
-
-    :return: Gyro and EV3Motors instances
-    """
-    # Create EV3 resource objects
-    gyroSensor = ev3.GyroSensor()
-    gyroSensor.mode = gyroSensor.MODE_GYRO_RATE
-
-    motorLeft = ev3.LargeMotor('outC')
-    motorRight = ev3.LargeMotor('outB')
-
-    # Open sensor and motor files
-    gyroSensorValueRaw = open(gyroSensor._path + "/value0", "rb")
-
-    # Reset the motors
-    motorLeft.reset()
-    motorRight.reset()
-    motorLeft.run_direct()
-    motorRight.run_direct()
-
-    motorEncoderLeft = open(motorLeft._path + "/position", "rb")
-    motorEncoderRight = open(motorRight._path + "/position", "rb")
-
-    return gyroSensorValueRaw, motorEncoderLeft, motorEncoderRight
+	# Indicate sensor type and port number
+	BP.set_sensor_type(sensor_gyro, BP.SENSOR_TYPE.NONE)
+	print ("Gyro init.. Keep robot still\n")
+	
+	# configure gyro sensor in Degrees Per Second mode, and wait for it to be configured.
+	BP.set_sensor_type(sensor_gyro, BP.SENSOR_TYPE.EV3_GYRO_DPS)
+	Continue = False
+	while not Continue:
+		try:
+			gvalTest = BP.get_sensor(sensor_gyro)  # Read a test value from Gyro
+			Continue = True
+		except brickpi3.SensorError:
+			pass
+		time.sleep(0.1)
 
 # ----------- Actuator Methods -----------------
 
 
-# For writing to motor files
+# For writing to motor files (not needed)
+"""
 def MotorWrite(outfile, value):
     outfile.truncate(0)
     outfile.write(str(int(value)))
     outfile.flush()
+"""
 
 
-# Function to set the duty cycle of the motors
-def SetDuty(motorDutyFileHandle, voltage):
-    # Voltage to PWM and cast to int
-    duty = int(round(voltage*100/8.087))
+def SetDuty(motor, voltage):
+	# Voltage to PWM and cast to int
+	duty = int(round(voltage*255/8.087))
+	# Clamp the value between -100 and 100
+	if duty > 0:
+		duty = min(100, duty)
+	elif duty < 0:
+		duty = max(-100, duty)
 
-    # Clamp the value between -100 and 100
-    if duty > 0:
-        duty = min(100, duty)
-    elif duty < 0:
-        duty = max(-100, duty)
-
-    # Apply the signal to the motor
-    MotorWrite(motorDutyFileHandle, duty)
+	# Apply the signal to the motor
+	BP.set_motor_power(motor, duty)
 
 
 def init_actuators():
-    """ Instantiates and calibrates both gyro sensor and motors
-
-    :return: Gyro and EV3Motors instances
-    """
-    motorLeft = ev3.LargeMotor('outC')
-    motorRight = ev3.LargeMotor('outB')
-
-    # Reset the motors
-    motorLeft.reset()
-    motorRight.reset()
-    motorLeft.run_direct()
-    motorRight.run_direct()
-
-    motorDutyCycleFile_left = open(motorLeft._path + "/duty_cycle_sp", "w")
-    motorDutyCycleFile_right = open(motorRight._path + "/duty_cycle_sp", "w")
-
-    return motorDutyCycleFile_left, motorDutyCycleFile_right
+	""" 
+	Reset motor encoders
+	"""
+	BP.offset_motor_encoder(motor_left, BP.get_motor_encoder(motor_left))
+	BP.offset_motor_encoder(motor_right, BP.get_motor_encoder(motor_right))
 
 # ----------- Main Loop -----------------
 
@@ -139,41 +122,38 @@ def main(ts, c_addr, s_port, a_port, log_enabled):
     :param log_enabled: Set to 'True' to activate logging sensor measurements & states into logfile
     :return: None
     """
-
-    buttons = ev3.Button()
-    leds = ev3.Leds()
-
-    leds.set_color(leds.LEFT, leds.RED)
-    leds.set_color(leds.RIGHT, leds.RED)
-
+	
     logging.info("Lay down the robot. Press the up button to start calibration. Press the down button to exit.")
 
-    # Initialization of the sensors
-    gyroSensorValueRaw, \
-    motorEncoderLeft, motorEncoderRight = init_sensors()
+    # Initialization of the sensors 
+    init_sensors()  # Return a success/ failure value
 
     logging.debug("Initialized sensors")
 
     # Initialization of the actuators
-    motorDutyCycleFile_left, motorDutyCycleFile_right = init_actuators()
+    init_actuators()
 
     logging.debug("Initialized actuators")
 
-    # Wait for up or down button
+    # Wait for up or down button (No buttons n BrickPi)
+    """
     while not buttons.up and not buttons.down:
         time.sleep(0.01)
+ 
 
     # If the up button was pressed wait for release and start calibration
     while buttons.up:
         time.sleep(0.01)
+    
+    """
 
     # Calibration
-    gyroOffset = calibrate_gyro(gyroSensorValueRaw)
+    gyroOffset = calibrate_gyro()
 
     logging.info("Calibration done. Start the Controller and lift me!")
-    ev3.Sound.beep().wait()
-    leds.set_color(leds.LEFT, leds.AMBER)
-    leds.set_color(leds.RIGHT, leds.AMBER)
+    # ev3.Sound.beep().wait()
+    # leds.set_color(leds.LEFT, leds.AMBER)
+    # leds.set_color(leds.RIGHT, leds.AMBER)
 
     # Initialization of the sensor sockets
     udp_socket_sensor = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -195,7 +175,7 @@ def main(ts, c_addr, s_port, a_port, log_enabled):
 
     # Aux variables
     first_packet = True
-    buttons = ev3.Button()
+    # buttons = ev3.Button()
     seq_no_applied = 0
     motor_voltage_applied_left = 0
     motor_voltage_applied_right = 0
@@ -230,14 +210,13 @@ def main(ts, c_addr, s_port, a_port, log_enabled):
 
         k += 1
 
-        # Sensor readings
         tsr_km1 = tsr_k
         tsr_k = time.perf_counter()
-        gyro = SensorRead(gyroSensorValueRaw)
+        gyro = BP.get_sensor(sensor_gyro)
         new_sens_timestamp = time.perf_counter()
 
-        enc_l = SensorRead(motorEncoderLeft)
-        enc_r = SensorRead(motorEncoderRight)
+        enc_l = BP.get_motor_encoder(motor_left)
+        enc_r = BP.get_motor_encoder(motor_right)
 
         diff_sens_timestamp = new_sens_timestamp - old_sens_timestamp
         old_sens_timestamp = new_sens_timestamp
@@ -279,8 +258,8 @@ def main(ts, c_addr, s_port, a_port, log_enabled):
                 if rx_packet is not None:
                     if first_packet:
                         logging.info("Control loop started.")
-                        leds.set_color(leds.LEFT, leds.GREEN)
-                        leds.set_color(leds.RIGHT, leds.GREEN)
+                        # leds.set_color(leds.LEFT, leds.GREEN)
+                        # leds.set_color(leds.RIGHT, leds.GREEN)
                         first_packet = False
                     tasrx_k = time.perf_counter()  # reception of the time request from the controller
                     logging.debug("Actuation %d received at %f" % (k, tasrx_k))
@@ -309,8 +288,8 @@ def main(ts, c_addr, s_port, a_port, log_enabled):
                             pass
                         if log_enabled:
                             f.write("%f,%f,%f,%f,%f\n" % (gyro, enc_l, enc_r, tau_RTT, prediction_count))
-                        SetDuty(motorDutyCycleFile_left, voltage_left)
-                        SetDuty(motorDutyCycleFile_right, voltage_right)
+                        SetDuty(motor_left, voltage_left)
+                        SetDuty(motor_right, voltage_right)
                         taw_k = time.perf_counter()
                         break
  
@@ -326,11 +305,11 @@ def main(ts, c_addr, s_port, a_port, log_enabled):
                 logging.debug("Socket error, exiting")
                 traceback.print_exc()
                 return
-
-            # Killswitch: if up button pressed, turn off motors and exit
-            if buttons.up:
-                SetDuty(motorDutyCycleFile_left, 0)
-                SetDuty(motorDutyCycleFile_right, 0)
+                
+			# Killswitch: if up button pressed, turn off motors and exit
+            if buttons:
+                SetDuty(motor_left, 0)
+                SetDuty(motor_right, 0)
                 logging.debug("avg_diff: %f, var_diff: %f, sampling_time: %f", avg_diff, diff_variance, p.SAMPLING_TIME)
                 logging.info("Control loop stopped.")
                 leds.set_color(leds.LEFT, leds.RED)
@@ -338,7 +317,7 @@ def main(ts, c_addr, s_port, a_port, log_enabled):
                 if log_enabled:
                     f.close()
                 exit()
-
+			
             # If time's up, break reception loop
             if time.perf_counter() >= (next_trigger_time-0.006):
                 if receptionStarted:
@@ -348,8 +327,8 @@ def main(ts, c_addr, s_port, a_port, log_enabled):
                             logging.debug("Prediction step %d, %d", prediction_count, k)
                         voltage_left = voltagePredictions[2*prediction_count]
                         voltage_right = voltagePredictions[2*prediction_count+1]
-                        SetDuty(motorDutyCycleFile_left, voltage_left)
-                        SetDuty(motorDutyCycleFile_right, voltage_right)
+                        SetDuty(motor_left, voltage_left)
+                        SetDuty(motor_right, voltage_right)
                         taw_k = time.perf_counter() # theoretical application timestamp
                         motor_voltage_applied_left = voltage_left
                         motor_voltage_applied_right = voltage_right
